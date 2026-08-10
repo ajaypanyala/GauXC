@@ -9,6 +9,9 @@
 #
 # See LICENSE.txt for details
 #
+# Cube file writer is a self-contained utility (no third-party deps); always build it.
+target_sources( gauxc PRIVATE cube.cxx )
+
 if( GAUXC_ENABLE_HDF5 )
   include(FetchContent)
   find_package(HDF5)
@@ -45,7 +48,7 @@ if( GAUXC_ENABLE_HDF5 )
       endif()
 
     endif()
-    target_sources( gauxc PRIVATE hdf5_write.cxx hdf5_read.cxx )
+    target_sources( gauxc PRIVATE hdf5_write.cxx hdf5_read.cxx cube_hdf5.cxx )
     if( GAUXC_ENABLE_C )
       target_sources( gauxc PRIVATE c_hdf5_read.cxx c_hdf5_write.cxx )
     endif()

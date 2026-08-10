@@ -69,6 +69,7 @@ add_executable( gauxc_test
   basis/parse_basis.cxx
   dd_psi_potential_test.cxx
   2nd_derivative_test.cxx
+  orbital_evaluator_test.cxx
   c_api_test.cxx
 )
 target_link_libraries( gauxc_test PUBLIC gauxc gauxc_catch2 Eigen3::Eigen )
@@ -82,6 +83,9 @@ endif()
 
 
 set( GAUXC_REF_DATA_PATH "${PROJECT_SOURCE_DIR}/tests/ref_data" )
+# Scratch directory for tests which write files (cube I/O)
+set( GAUXC_TEST_TMP_PATH "${PROJECT_BINARY_DIR}/tests/tmp" )
+file( MAKE_DIRECTORY "${GAUXC_TEST_TMP_PATH}" )
 configure_file( ut_common.hpp.in ${PROJECT_BINARY_DIR}/tests/ut_common.hpp )
 target_include_directories( gauxc_test PRIVATE ${PROJECT_BINARY_DIR}/tests )
 target_include_directories( gauxc_test PRIVATE ${PROJECT_SOURCE_DIR}/tests )

@@ -40,6 +40,8 @@ add_library( gauxc
   molgrid_impl.cxx 
   molgrid_defaults.cxx 
   atomic_radii.cxx
+  cube_grid.cxx
+  orbital_evaluator.cxx
 )
 
 if( GAUXC_ENABLE_C )

@@ -16,7 +16,7 @@
 #include "device_specific/hip_util.hpp"
 #include "hip_extensions.hpp"
 #include "device_specific/hip_device_constants.hpp"
-#include <cub/device/device_scan.cuh>
+#include <hipcub/device/device_scan.hpp>
 #include "buffer_adaptor.hpp"
 #include "device/common/device_blas.hpp"
 //#include <mpi.h>
@@ -313,7 +313,7 @@ __global__ void bitvector_to_position_list_shellpair(
   uint32_t*       position_list
 ) {
 
-  constexpr auto warp_size = hip::warp_size;
+  constexpr auto warp_size = 32; // matches dim3 threads(32,32) below, independent of hip::warp_size -- see hipify.sh
   constexpr auto element_size = CHAR_BIT * sizeof(buffer_type);
   constexpr auto buffer_size_bits = element_size * buffer_size;
   __shared__ buffer_type collisions_buffer[warp_size][warp_size][buffer_size];
@@ -376,7 +376,7 @@ __global__ void bitvector_to_position_list_shells(
           uint32_t* position_list, 
            size_t* nbe_list
 ) {
-  constexpr auto warp_size = hip::warp_size;
+  constexpr auto warp_size = 32; // matches dim3 threads(32,32) below, independent of hip::warp_size -- see hipify.sh
   constexpr auto element_size = CHAR_BIT * sizeof(buffer_type);
   constexpr auto buffer_size_bits = element_size * buffer_size;
   __shared__ buffer_type collisions_buffer[warp_size][warp_size][buffer_size];
@@ -523,7 +523,7 @@ void exx_ek_shellpair_collision(
     hipDeviceAttributeMaxSharedMemoryPerBlock, dev_id);
 
   if (requiredSharedMemoryInBytes > maxSharedMemoryPerBlock) {
-    hipError_t res = hipFuncSetAttribute(&exx_ek_shellpair_collision_shared_kernel,
+    hipError_t res = hipFuncSetAttribute(reinterpret_cast<const void*>(&exx_ek_shellpair_collision_shared_kernel),
       hipFuncAttributeMaxDynamicSharedMemorySize, maxSharedMemoryPerBlockOptin);
 
     if (requiredSharedMemoryInBytes > maxSharedMemoryPerBlockOptin) {

@@ -15,10 +15,16 @@
 # installation, and so that the handful of NON-mechanical decisions are
 # documented in one place:
 #
-#   * warp/wavefront size is NOT hardcoded anywhere; kernels take it from
-#     GauXC::cuda::warp_size -> GauXC::hip::warp_size (32 vs 64), so the
-#     launch geometry adapts.  Kernels that assume a 32-wide reduction
-#     must be reviewed by hand -- see CHECK_WAVEFRONT below.
+#   * Where possible, warp/wavefront size is NOT hardcoded; kernels take
+#     it from GauXC::cuda::warp_size -> GauXC::hip::warp_size (32 vs 64),
+#     so the launch geometry adapts. A handful of kernels below instead
+#     hardcode a fixed 32 for HIP -- these are cases where 32 is really a
+#     tile/launch WIDTH that must stay in lockstep with an array extent
+#     sized against CUDA's warp_size, not a stand-in for the true
+#     wavefront width; see symmetrize_mat.cu, uvvars_gga/mgga.hpp and
+#     exx_ek_screening_bfn_stats.cu below.  Kernels that assume a 32-wide
+#     reduction must otherwise be reviewed by hand -- see CHECK_WAVEFRONT
+#     below.
 #   * __syncwarp() has no HIP equivalent; wavefronts execute in lockstep
 #     on AMD, so it is commented out (the convention already used by the
 #     2022 port in this directory).
@@ -39,15 +45,27 @@
 #     so block_size is decoupled to a fixed 32 for HIP -- independent of
 #     hip::warp_size, still square, still <=1024 threads/block and well
 #     under the LDS budget.
-#   * uvvars_gga.hpp/uvvars_mgga.hpp size a __shared__ tile as
-#     [rows][warp_size][SM_BLOCK+1]; warp_size must stay equal to the
-#     true warp/wavefront width (it indexes threadIdx.x directly in a
-#     warp-synchronous reduction), but at hip::warp_size==64 the CUDA
-#     tuning of SM_BLOCK==32 overflows AMD's 64KB LDS limit (rows==4:
-#     4*64*33*8 = 67584B > 65536B). SM_BLOCK is otherwise just a
-#     performance tile width, so it is halved to 16 for HIP only
-#     (4*64*17*8 = 34816B); this trades tiling granularity for fitting
-#     in LDS, with no correctness impact.
+#   * uvvars_gga.hpp/uvvars_mgga.hpp's eval_vvar_{gga,mgga}_kern build a
+#     __shared__ den_shared[rows][warp_size][SM_BLOCK+1] tile that is
+#     WRITTEN with threadIdx.x indexing the warp_size dimension and READ
+#     BACK with threadIdx.x indexing the SM_BLOCK dimension (a transpose).
+#     That is only a valid transpose -- and only avoids reading
+#     uninitialised/aliased entries -- when blockDim.x == SM_BLOCK ==
+#     warp_size, which is how CUDA sizes it (32 == 32 == 32) and how it is
+#     launched (uvvars.cu: dim3 threads(cuda::warp_size, ...)). This local
+#     "warp_size" is therefore the tile/launch width, not the true
+#     warp/wavefront width (contrast the direct-atomicAdd reduction in
+#     uvvars_lda.hpp, which has no tile and is correct at the true 64-wide
+#     hip::warp_size). Naively carrying hip::warp_size (64) into it, as the
+#     generic cuda::->hip:: rule does, keeps SM_BLOCK/the launch at 32 and
+#     breaks the invariant: reads alias into neighbouring point rows, and
+#     the reduction sums 64 lanes of which only 32 were ever written --
+#     silently wrong densities, not a crash. So this local warp_size, and
+#     the matching GGA/MGGA vvars launch geometry in uvvars.hip, are
+#     pinned to a fixed 32 for HIP, independent of hip::warp_size --
+#     matching CUDA's numbers exactly and keeping the tile
+#     ([rows][32][33]) well under the 64KB LDS limit without needing to
+#     shrink SM_BLOCK at all.
 #   * <cuda.h> (the CUDA driver API header) is dropped rather than mapped
 #     to a HIP equivalent; nothing in the translated files uses driver-API
 #     symbols, and hip/hip_runtime.h (inserted below) already covers the
@@ -64,7 +82,22 @@
 #     equals the warp width -- true for cuda::warp_size (32) but not for
 #     hip::warp_size (64, an AMD wavefront). The static_assert is
 #     loosened to <= and the two loads are guarded so lanes >=
-#     shell_nprim_max (idle on AMD) don't read/write out of bounds.
+#     shell_nprim_max don't read/write out of bounds (those lanes are NOT
+#     idle on AMD -- they go on to process points in the ipt = threadIdx.x
+#     % hip::warp_size loop below; only the primitive load is guarded).
+#     That guard is necessary but not sufficient: my_alpha/my_coeff pick
+#     their per-wavefront __shared__ row via threadIdx.x/32, an
+#     untranslated literal left over from CUDA (where 32 coincides with
+#     cuda::warp_size). On HIP the true wavefront is 64 lanes, so each
+#     64-lane wavefront spans TWO threadIdx.x/32 groups/rows; the guard
+#     above (warp_rank = threadIdx.x % hip::warp_size < shell_nprim_max)
+#     is true only for the low 32 lanes of the wavefront, so the row
+#     belonging to the high 32 lanes is never written and is read back as
+#     uninitialised garbage. threadIdx.x/32 is changed to
+#     threadIdx.x/hip::warp_size so the row groups line up with actual
+#     wavefronts (and, correspondingly, with warp_rank's own use of
+#     hip::warp_size); the alpha/coeff shared arrays have 16 rows, so at
+#     64 lanes/row this uses at most 8 of them -- no resize needed.
 #
 # Usage:  ./hipify.sh          (from this directory)
 
@@ -122,8 +155,8 @@ hipify_file() {
     -e 's|static_assert( detail::shell_nprim_max == hip::warp_size );|static_assert( detail::shell_nprim_max <= hip::warp_size );|g' \
     -e 's|my_alpha\[warp_rank\] = alpha_gm\[warp_rank\];|if( warp_rank < detail::shell_nprim_max ) my_alpha[warp_rank] = alpha_gm[warp_rank];|g' \
     -e 's|my_coeff\[warp_rank\] = coeff_gm\[warp_rank\];|if( warp_rank < detail::shell_nprim_max ) my_coeff[warp_rank] = coeff_gm[warp_rank];|g' \
-    -e 's|#define VVAR_KERNEL_SM_BLOCK 32|#define VVAR_KERNEL_SM_BLOCK 16|g' \
-    -e 's|#define MGGA_KERNEL_SM_BLOCK 32|#define MGGA_KERNEL_SM_BLOCK 16|g' \
+    -e 's|alpha\[threadIdx\.x/32\]|alpha[threadIdx.x/hip::warp_size]|g' \
+    -e 's|coeff\[threadIdx\.x/32\]|coeff[threadIdx.x/hip::warp_size]|g' \
     -e 's|constexpr uint32_t block_size = hip::warp_size;|constexpr uint32_t block_size = 32; // fixed, independent of hip::warp_size -- see hipify.sh|g' \
     -e 's|// Warp size must equal max_warps_per_thread_block must equal 32|// block_size is fixed at 32 for HIP, independent of hip::warp_size -- see hipify.sh|g' \
     -e 's|dim3 threads(hip::warp_size, hip::max_warps_per_thread_block), blocks(num_blocks);|dim3 threads(32, 32), blocks(num_blocks);|g' \
@@ -162,6 +195,93 @@ hipify_file() {
     sed -i -e 's|constexpr auto warp_size = hip::warp_size;|constexpr auto warp_size = 32; // matches dim3 threads(32,32) below, independent of hip::warp_size -- see hipify.sh|g' \
         "$dst"
   fi
+
+  # eval_vvar_{gga,mgga}_kern in uvvars_gga.hpp/uvvars_mgga.hpp (marked by
+  # the den_shared[] tile they declare) use "warp_size" as a tile/launch
+  # WIDTH that must stay 32 in lockstep with SM_BLOCK and the kernel's
+  # launch geometry, not the true wavefront width -- see the header
+  # comment above. Pin it, matching the exx_ek_screening treatment above.
+  if grep -q 'den_shared\[' "$dst"; then
+    sed -i -e 's|constexpr auto warp_size = hip::warp_size;|constexpr auto warp_size = 32; // tile/launch width, independent of hip::warp_size -- see hipify.sh|g' \
+        "$dst"
+  fi
+
+  # eval_vvars_gga_impl/eval_vvars_mgga_impl in uvvars.hip launch
+  # eval_vvar_{gga,mgga}_kern with dim3 threads( hip::warp_size, ... ) --
+  # the generic cuda::->hip:: translation of CUDA's dim3
+  # threads(cuda::warp_size, ...). blockDim.x must match the tile/launch
+  # width pinned to 32 above (not the true 64-wide hip::warp_size), so
+  # this launch geometry is fixed to 32 for those two impls only;
+  # eval_vvars_lda_impl's identical-looking launch has no tile and is
+  # correctly left at hip::warp_size (uvvars_lda.hpp's reduction is a
+  # direct atomicAdd with no shared-memory transpose to keep in step).
+  if grep -q 'eval_vvars_gga_impl\|eval_vvars_mgga_impl' "$dst"; then
+    awk '
+      /^void eval_vvars_gga_impl\(/  { fn = "gga" }
+      /^void eval_vvars_mgga_impl\(/ { fn = "mgga" }
+      /^void eval_vvars_lda_impl\(/  { fn = "" }
+      /^void eval_tmat_/             { fn = "" }
+      /dim3 threads\( hip::warp_size, hip::max_warps_per_thread_block, 1 \);/ && (fn == "gga" || fn == "mgga") {
+        print "  dim3 threads( 32, hip::max_warps_per_thread_block, 1 ); // tile/launch width pinned to 32, independent of hip::warp_size -- see hipify.sh"
+        next
+      }
+      { print }
+    ' "$dst" > "$dst.tmp"
+    mv "$dst.tmp" "$dst"
+  fi
+
+  # exx_ek_screening_bfn_stats_kernel (same source file as the
+  # bitvector_to_position_list_* kernels above, but a different kernel)
+  # sizes its bf_shared[32][32+1]/bfn_sum_shared[32] tile off the literal
+  # 32 that CUDA's warp_lane/warp_id/nwarp/warp_reduce_* all coincide
+  # with, but otherwise consistently uses hip::warp_size (64) for those
+  # same quantities. That mismatch is an out-of-bounds LDS write/read
+  # (warp_lane reaches 63), not merely wrong numbers. Rather than resize
+  # the tile to the true wavefront width (blockDim.x is hardcoded to 1024
+  # at the call site, so the row count is a fixed constant either way),
+  # pin warp_lane/warp_id/nwarp and the warp_reduce_* widths to 32 for
+  # this one kernel -- each real 64-lane wavefront then behaves as two
+  # independent 32-lane groups, matching CUDA's numbers exactly and the
+  # tile's existing 32x33 sizing, consistent with the [32]-pinning already
+  # used for this file's other kernel above. Scoped to this kernel's body
+  # only (brace-depth tracked) so the true-64-wide uses of hip::warp_size
+  # elsewhere in this file (exx_ek_collapse_fmax_to_shells_kernel, which
+  # has no shared-memory tile, and the host-side launch geometry) are
+  # untouched.
+  if grep -q 'exx_ek_screening_bfn_stats_kernel' "$dst"; then
+    awk '
+      {
+        line = $0
+        if (!infn && line ~ /^__global__ void exx_ek_screening_bfn_stats_kernel\(/) {
+          infn = 1; depth = 0; entered = 0
+        }
+        if (infn) {
+          if (line ~ /hip::warp_size/)
+            gsub(/hip::warp_size/, "32 /* pinned, independent of hip::warp_size -- see hipify.sh */", line)
+          opens  = gsub(/\{/, "{", line)
+          closes = gsub(/\}/, "}", line)
+          if (opens > 0) entered = 1
+          depth += opens - closes
+        }
+        print line
+        if (infn && entered && depth <= 0) infn = 0
+      }
+    ' "$dst" > "$dst.tmp"
+    mv "$dst.tmp" "$dst"
+  fi
+
+  # compute_grid_to_center_dist's inner loop stride is hardcoded to
+  # hip::warp_size/2 (32), on the assumption that blockDim.y ==
+  # warp_size/2 -- true on CUDA (distance_thread_y == cuda::warp_size/2
+  # == 16 == blockDim.y) but not on HIP, where
+  # distance_thread_y == hip::max_warps_per_thread_block/2 == 8 while the
+  # stride is still 32: threadIdx.y in [0,8) only reaches k in
+  # {0..7} u {32..39}, leaving 48 of every 64 points' dist[] entries
+  # whatever was there before. Stride by the actual blockDim.y instead of
+  # a hardcoded value derived from warp_size -- warp-width-agnostic and
+  # correct on both backends (it reduces to the same 16 on CUDA).
+  sed -i -e 's|for (int k = threadIdx\.y; k < hip::warp_size; k+=hip::warp_size/2) {|for (int k = threadIdx.y; k < hip::warp_size; k+=blockDim.y) { // stride by actual blockDim.y, not a hardcoded warp_size/2 -- see hipify.sh|' \
+      "$dst"
 
   # HIP needs its runtime header; insert before the first #include (i.e.
   # after the license comment block).

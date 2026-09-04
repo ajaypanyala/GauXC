@@ -15,7 +15,7 @@
 #include "device_specific/hip_util.hpp"
 #include "device/xc_device_data.hpp"
 
-#define VVAR_KERNEL_SM_BLOCK 16
+#define VVAR_KERNEL_SM_BLOCK 32
 #define GGA_KERNEL_SM_WARPS 16
 
 namespace GauXC {
@@ -37,7 +37,7 @@ __global__ void eval_vvar_gga_kern( size_t        ntasks,
   double* den_y_eval_device = nullptr;
   double* den_z_eval_device = nullptr;
 
-  constexpr auto warp_size = hip::warp_size;
+  constexpr auto warp_size = 32; // tile/launch width, independent of hip::warp_size -- see hipify.sh
 
   if constexpr (trial){
     if constexpr (den_select == DEN_S) {

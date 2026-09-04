@@ -42,14 +42,14 @@ __global__ void exx_ek_screening_bfn_stats_kernel( size_t ntasks,
   const auto* weights_device    = task.weights;
   //double* bfn_max_device  = task.bfn_max;
 
-  const int warp_lane = threadIdx.x % hip::warp_size;
-  const int warp_id   = threadIdx.x / hip::warp_size;
-  const int nwarp  = blockDim.x  / hip::warp_size;
+  const int warp_lane = threadIdx.x % 32 /* pinned, independent of hip::warp_size -- see hipify.sh */;
+  const int warp_id   = threadIdx.x / 32 /* pinned, independent of hip::warp_size -- see hipify.sh */;
+  const int nwarp  = blockDim.x  / 32 /* pinned, independent of hip::warp_size -- see hipify.sh */;
 
 
 
   // First scale the basis functions by the weights
-  for(int ipt = warp_lane; ipt < npts; ipt += hip::warp_size) {
+  for(int ipt = warp_lane; ipt < npts; ipt += 32 /* pinned, independent of hip::warp_size -- see hipify.sh */) {
     const auto w = std::sqrt(weights_device[ipt]);
     for(int ibf = warp_id; ibf < nbf; ibf += nwarp) {
       const auto val = basis_eval_device[ ipt + ibf*npts ];
@@ -66,11 +66,11 @@ __global__ void exx_ek_screening_bfn_stats_kernel( size_t ntasks,
   bfn_sum_shared[warp_lane] = 0.0;
   __syncthreads();
 
-  const int npts_chunks = GauXC::util::div_ceil(npts, hip::warp_size);
+  const int npts_chunks = GauXC::util::div_ceil(npts, 32 /* pinned, independent of hip::warp_size -- see hipify.sh */);
   const int  nbf_chunks = GauXC::util::div_ceil(nbf,  nwarp);
   for(int ipts_chunk = 0; ipts_chunk < npts_chunks; ++ipts_chunk) {
     double tmp_bfn_sum = 0.0;
-    const int ipt = ipts_chunk * hip::warp_size + warp_lane;
+    const int ipt = ipts_chunk * 32 /* pinned, independent of hip::warp_size -- see hipify.sh */ + warp_lane;
   for(int  ibf_chunk = 0;  ibf_chunk <  nbf_chunks; ++ ibf_chunk) {
     const int ibf =  ibf_chunk * nwarp + warp_id;
 
@@ -90,7 +90,7 @@ __global__ void exx_ek_screening_bfn_stats_kernel( size_t ntasks,
     // Do a sum reduce over basis functions for the chunk
     // Now every warp has the local bfn chunk sum in lane 0
     // corresponding to the point represented by the warp Id
-    tmp_bfn_sum += hip::warp_reduce_sum<hip::warp_size>(tmp);
+    tmp_bfn_sum += hip::warp_reduce_sum<32 /* pinned, independent of hip::warp_size -- see hipify.sh */>(tmp);
     
   }
     // At this point, every warp contains the total bfn sum
@@ -108,7 +108,7 @@ __global__ void exx_ek_screening_bfn_stats_kernel( size_t ntasks,
   double max_bfn_sum;
   if(warp_id == 0) {
     auto tmp = bfn_sum_shared[warp_lane];
-    max_bfn_sum = hip::warp_reduce_max<hip::warp_size>(tmp);
+    max_bfn_sum = hip::warp_reduce_max<32 /* pinned, independent of hip::warp_size -- see hipify.sh */>(tmp);
   }
 
   if(threadIdx.x == 0) {
@@ -122,13 +122,13 @@ __global__ void exx_ek_screening_bfn_stats_kernel( size_t ntasks,
   __syncthreads();
   for(int ibf = warp_id; ibf < nbf; ibf += nwarp) {
     double max_bf = 0;
-    for(int ipt = warp_lane; ipt < npts; ipt += hip::warp_size) {
+    for(int ipt = warp_lane; ipt < npts; ipt += 32 /* pinned, independent of hip::warp_size -- see hipify.sh */) {
       const auto val = basis_eval_device[ipt + ibf*npts];
       max_bf = fmax( max_bf, val );
     }
 
     // Warp reduce bf max
-    max_bf = hip::warp_reduce_max<hip::warp_size>(max_bf);
+    max_bf = hip::warp_reduce_max<32 /* pinned, independent of hip::warp_size -- see hipify.sh */>(max_bf);
     if(warp_lane == 0) {
       //printf("[GPU] ITASK = %d MAX_BFN(0) = %.6e\n", batch_idx, max_bf);
       bfn_max_device[batch_idx + task.bfn_shell_indirection[ibf]*LDBFM] =

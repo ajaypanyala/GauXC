@@ -29,8 +29,8 @@ __global__ __launch_bounds__(512,2) void collocation_device_shell_to_task_kernel
 
   __shared__ double alpha[16][detail::shell_nprim_max + 1]; 
   __shared__ double coeff[16][detail::shell_nprim_max + 1];
-  double* my_alpha = alpha[threadIdx.x/32];
-  double* my_coeff = coeff[threadIdx.x/32];
+  double* my_alpha = alpha[threadIdx.x/hip::warp_size];
+  double* my_coeff = coeff[threadIdx.x/hip::warp_size];
 
   for( auto ish = blockIdx.z; ish < nshell; ish += gridDim.z ) {
   const uint32_t ntasks      = shell_to_task[ish].ntask;

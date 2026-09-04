@@ -98,6 +98,26 @@
 #     wavefronts (and, correspondingly, with warp_rank's own use of
 #     hip::warp_size); the alpha/coeff shared arrays have 16 rows, so at
 #     64 lanes/row this uses at most 8 of them -- no resize needed.
+#   * pack_submat.cu/cuda_inc_potential.cu's submatrix scatter/gather
+#     kernels (pack density into per-task submatrices; gather task-local
+#     VXC/K contributions back into the global matrix) iterate over
+#     CUT_Y/CUT_X-sized blocks and WARP_X-wide lanes -- WARP_X (16),
+#     CUT_X, CUT_Y (8, 8) are plain tuning constants, untouched by any
+#     cuda::/hip:: translation, on the assumption that the launch
+#     geometry equals them exactly: cuda::warp_size/2 == 16 == WARP_X and
+#     cuda::max_warps_per_thread_block*2 == 64 == CUT_Y*CUT_X. On HIP the
+#     generic translation instead gives (32, 32): tid_yy (=threadIdx.y/
+#     CUT_X) only reaches half of CUT_Y's range, so every other block of
+#     rows is never visited (undercounting -- explains e.g. EXC/N_EL
+#     coming out systematically low), while tid_xy (=threadIdx.x/WARP_X,
+#     always 0 on CUDA since blockDim.x==WARP_X there) now also takes 1,
+#     redundantly re-covering columns already handled by tid_xy==0 and
+#     double-atomicAdd-ing them (undefined accumulation order -- explains
+#     the run-to-run non-determinism in repeated identical evaluations).
+#     Neither kernel body calls a warp-synchronous primitive (only
+#     atomicAdd), so there is no real dependence on the physical
+#     wavefront width here at all; the launch geometry is pinned to a
+#     fixed (16, 64), matching CUDA's numbers exactly.
 #
 # Usage:  ./hipify.sh          (from this directory)
 
@@ -161,6 +181,7 @@ hipify_file() {
     -e 's|// Warp size must equal max_warps_per_thread_block must equal 32|// block_size is fixed at 32 for HIP, independent of hip::warp_size -- see hipify.sh|g' \
     -e 's|dim3 threads(hip::warp_size, hip::max_warps_per_thread_block), blocks(num_blocks);|dim3 threads(32, 32), blocks(num_blocks);|g' \
     -e 's|const size_t num_blocks = ((N + hip::warp_size - 1) / hip::warp_size);|const size_t num_blocks = ((N + 32 - 1) / 32);|g' \
+    -e 's|dim3 threads( hip::warp_size/2, hip::max_warps_per_thread_block \* 2, 1 );|dim3 threads( 16, 64, 1 ); // matches WARP_X=16, CUT_Y*CUT_X=64 below, independent of hip::warp_size -- see hipify.sh|g' \
     "$src" > "$dst"
 
   # CUDA cache-hint stores have no HIP counterpart: __stcs() is an NVIDIA
